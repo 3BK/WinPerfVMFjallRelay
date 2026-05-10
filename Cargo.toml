@@ -1,0 +1,37 @@
+## Template 
+
+[package]
+name = "vm-iggy-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Async & Networking
+tokio = { version = "1.40", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"
+
+# Windows Native & IPC
+windows-service = "0.7"
+windows-sys = { version = "0.52", features = [
+    "Win32_Security_Cryptography",
+    "Win32_Foundation",
+    "Win32_System_SystemServices",
+    "Win32_System_EventLog"
+] }
+winlog = "0.3" # Native Event Log wrapper
+
+# Safety & Compliance
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+hex = "0.4"
+rand = "0.8"
+iggy = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+strip = true
+lto = true
+panic = "abort"
