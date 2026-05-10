@@ -1,5 +1,4 @@
 use windows_sys::Win32::{
-    Foundation::HANDLE,
     Security::Cryptography::{CertCloseStore, CertFreeCertificateContext, CERT_CONTEXT, HCERTSTORE},
 };
 use tokio::net::windows::named_pipe::NamedPipeServer;
