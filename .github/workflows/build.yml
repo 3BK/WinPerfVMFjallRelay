@@ -1,5 +1,7 @@
 name: Build Static Windows Binary
-on: [push]
+on: 
+  workflow_dispatch:
+
 
 jobs:
   build:
