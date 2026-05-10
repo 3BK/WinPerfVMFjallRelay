@@ -23,6 +23,7 @@ webpki-roots = "0.26"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 
 # Log-Structured Persistence
+log = "0.4"
 iggy = "0.10"
 
 # Windows Native Hardening
