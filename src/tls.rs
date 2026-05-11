@@ -6,7 +6,10 @@ use rustls::client::ResolvesClientCert;
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::sign::{CertifiedKey, Signer, SigningKey};
-use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureAlgorithm, SignatureScheme};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureAlgorithm,
+    SignatureScheme,
+};
 
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::ffi::CStr;
@@ -32,21 +35,43 @@ impl Drop for SecureCertStore {
 }
 
 /// Keepalive cert context wrapper.
-/// IMPORTANT: if CryptAcquireCertificatePrivateKey returns caller_free == FALSE, the handle lifetime
-/// can be tied to the cert context, so we must keep it alive while using the key. 【3-316fad】
-struct SecureCertContext(*const CERT_CONTEXT);
+///
+/// IMPORTANT: If CryptAcquireCertificatePrivateKey returns pfCallerFreeProvOrNCryptKey == FALSE,
+/// the handle lifetime may be tied to the certificate context, so we must keep the cert context
+/// alive while using the key handle. 【2-8006ff】【1-69f415】
+///
+/// To satisfy rustls Send+Sync bounds, we store the pointer address as usize (Send+Sync),
+/// and cast back only inside Drop.
+#[derive(Debug)]
+struct SecureCertContext {
+    ptr: usize, // PCCERT_CONTEXT as an integer
+}
+
+impl SecureCertContext {
+    #[inline]
+    fn new(ctx: *const CERT_CONTEXT) -> Self {
+        Self { ptr: ctx as usize }
+    }
+
+    #[inline]
+    fn as_ptr(&self) -> *const CERT_CONTEXT {
+        self.ptr as *const CERT_CONTEXT
+    }
+}
+
 impl Drop for SecureCertContext {
     fn drop(&mut self) {
         unsafe {
-            if !self.0.is_null() {
-                CertFreeCertificateContext(self.0);
+            let p = self.as_ptr();
+            if !p.is_null() {
+                CertFreeCertificateContext(p);
             }
         }
     }
 }
 
 /// Per CryptAcquireCertificatePrivateKey contract:
-/// free the handle only when pfCallerFreeProvOrNCryptKey is TRUE. 【3-316fad】
+/// free the handle only when pfCallerFreeProvOrNCryptKey is TRUE. 【2-8006ff】【1-69f415】
 /// Also keep the cert context alive when caller_must_free == false.
 struct SecureNcryptKey {
     h: HCRYPTPROV_OR_NCRYPT_KEY_HANDLE,
@@ -77,7 +102,7 @@ struct CRYPT_DATA_BLOB_REPR {
 
 /// Build rustls ClientConfig with:
 /// - ECDSA client auth using CNG key handle (mTLS) (non-exportable key).
-/// - Server certificate pinning (SHA-256 of end-entity DER) using dangerous()/custom verifier. 【4-9bed51】【2-c5c7b7】
+/// - Server certificate pinning (SHA-256 of end-entity DER) using dangerous()/custom verifier.
 pub fn build_rustls_config(
     client_cert_sha1_thumbprint: &str,
     server_cert_sha256_pin_hex: &str,
@@ -111,15 +136,16 @@ pub fn build_rustls_config(
     });
 
     // Load client mTLS identity (ECDSA CNG key)
-    let client_key = match load_ecdsa_cng_identity_from_localmachine_my(client_cert_sha1_thumbprint, audit) {
-        Ok(k) => k,
-        Err(e) => {
-            audit.log(Level::Error, 1042, &format!("mTLS identity load failed: {e}"));
-            panic!("mTLS identity load failed: {e}");
-        }
-    };
+    let client_key =
+        match load_ecdsa_cng_identity_from_localmachine_my(client_cert_sha1_thumbprint, audit) {
+            Ok(k) => k,
+            Err(e) => {
+                audit.log(Level::Error, 1042, &format!("mTLS identity load failed: {e}"));
+                panic!("mTLS identity load failed: {e}");
+            }
+        };
 
-    // Build ClientConfig using dangerous() custom verifier path. 【4-9bed51】【2-c5c7b7】
+    // Build ClientConfig using dangerous() custom verifier path.
     let cfg = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("rustls provider/version configuration error")
@@ -157,7 +183,9 @@ impl ServerCertVerifier for PinnedWebPkiVerifier {
         // Pin end-entity cert DER
         let actual = Sha256::digest(end_entity.as_ref());
         if !ct_eq_32(actual.as_slice(), &self.expected_pin) {
-            return Err(RustlsError::General("server certificate pin mismatch".to_string()));
+            return Err(RustlsError::General(
+                "server certificate pin mismatch".to_string(),
+            ));
         }
 
         Ok(verified)
@@ -202,7 +230,10 @@ fn parse_sha256_pin(pin_hex: &str) -> Result<[u8; 32], String> {
     let cleaned = pin_hex.replace(":", "").trim().to_string();
     let bytes = hex::decode(cleaned).map_err(|e| format!("hex decode failed: {e}"))?;
     if bytes.len() != 32 {
-        return Err(format!("expected 32 bytes (64 hex chars), got {}", bytes.len()));
+        return Err(format!(
+            "expected 32 bytes (64 hex chars), got {}",
+            bytes.len()
+        ));
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
@@ -224,7 +255,6 @@ impl ResolvesClientCert for FixedClientCertResolver {
         _root_hint_subjects: &[&[u8]],
         sigschemes: &[SignatureScheme],
     ) -> Option<Arc<CertifiedKey>> {
-        // Present cert only if compatible with server offer.
         if self.key.key.choose_scheme(sigschemes).is_some() {
             Some(self.key.clone())
         } else {
@@ -254,7 +284,6 @@ impl fmt::Debug for CngEcdsaSigningKey {
 
 impl SigningKey for CngEcdsaSigningKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
-        // Prefer strongest supported scheme first.
         let prefs = [
             SignatureScheme::ECDSA_NISTP384_SHA384,
             SignatureScheme::ECDSA_NISTP256_SHA256,
@@ -292,14 +321,17 @@ impl fmt::Debug for CngEcdsaSigner {
 }
 
 impl Signer for CngEcdsaSigner {
-    // rustls::sign::Signer returns Result<Vec<u8>, rustls::Error> 
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-        // IMPORTANT: rustls passes the message NOT hashed; we must hash based on the scheme. 
+        // rustls provides UNHASHED message; hash based on scheme.
         let digest = match self.scheme {
             SignatureScheme::ECDSA_NISTP256_SHA256 => Sha256::digest(message).to_vec(),
             SignatureScheme::ECDSA_NISTP384_SHA384 => Sha384::digest(message).to_vec(),
             SignatureScheme::ECDSA_NISTP521_SHA512 => Sha512::digest(message).to_vec(),
-            _ => return Err(rustls::Error::General("unsupported ECDSA signature scheme".into())),
+            _ => {
+                return Err(rustls::Error::General(
+                    "unsupported ECDSA signature scheme".into(),
+                ))
+            }
         };
 
         sign_ecdsa_hash(self.ncrypt.h, &digest)
@@ -313,7 +345,10 @@ impl Signer for CngEcdsaSigner {
 
 /// Sign a *hash* with CNG ECDSA key handle.
 /// NCryptSignHash expects hash bytes.
-fn sign_ecdsa_hash(hkey: HCRYPTPROV_OR_NCRYPT_KEY_HANDLE, hash: &[u8]) -> Result<Vec<u8>, ()> {
+fn sign_ecdsa_hash(
+    hkey: HCRYPTPROV_OR_NCRYPT_KEY_HANDLE,
+    hash: &[u8],
+) -> Result<Vec<u8>, ()> {
     unsafe {
         let mut sig_len: u32 = 0;
         let st = NCryptSignHash(
@@ -445,25 +480,29 @@ fn load_ecdsa_cng_identity_from_localmachine_my(
             return Err("certificate not found by SHA1 thumbprint".into());
         }
 
-        // Wrap CERT_CONTEXT in Arc so we can keep it alive if the key handle is cached. 【3-316fad】
-        let cert_ctx = Arc::new(SecureCertContext(ctx));
+        // Arc keepalive for contract compliance. 【2-8006ff】【1-69f415】
+        let cert_ctx = Arc::new(SecureCertContext::new(ctx));
 
-        // Optional sanity check: ensure certificate public key algorithm OID is EC.
         if !cert_is_ec(ctx) {
-            audit.log(Level::Warn, 1040, "Client certificate does not appear to be EC; assuming ECDSA anyway.");
+            audit.log(
+                Level::Warn,
+                1040,
+                "Client certificate does not appear to be EC; assuming ECDSA anyway.",
+            );
         }
 
         // Acquire private key (CNG only, silent)
         let mut key_handle: HCRYPTPROV_OR_NCRYPT_KEY_HANDLE = 0;
         let mut key_spec: u32 = 0;
 
-        // Use i32 rather than BOOL (avoids missing BOOL type in your build). 【1-654fc7】
+        // Use i32 rather than BOOL.
         let mut caller_free: i32 = 0;
 
         let flags = CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG;
 
+        // Use the keepalive cert context pointer here.
         let ok = CryptAcquireCertificatePrivateKey(
-            ctx as *const CERT_CONTEXT,
+            cert_ctx.as_ptr(),
             flags,
             ptr::null_mut(),
             &mut key_handle,
@@ -481,7 +520,7 @@ fn load_ecdsa_cng_identity_from_localmachine_my(
 
         let must_free = caller_free != 0;
 
-        // If the handle is cached (must_free == false), keep cert_ctx alive per contract. 【3-316fad】
+        // If cached handle (must_free == false), keep cert context alive. 【2-8006ff】【1-69f415】
         let keepalive = if must_free { None } else { Some(cert_ctx.clone()) };
 
         let ncrypt = Arc::new(SecureNcryptKey {
@@ -490,7 +529,7 @@ fn load_ecdsa_cng_identity_from_localmachine_my(
             _cert_ctx_keepalive: keepalive,
         });
 
-        // Leaf cert only (Pingora doesn't need full chain).
+        // Leaf cert only.
         let der = std::slice::from_raw_parts((*ctx).pbCertEncoded, (*ctx).cbCertEncoded as usize).to_vec();
         let cert_chain = vec![CertificateDer::from(der)];
 
@@ -510,7 +549,7 @@ fn cert_is_ec(ctx: *const CERT_CONTEXT) -> bool {
         if oid_ptr.is_null() {
             return false;
         }
-        // windows-sys exposes pszObjId as *mut u8; CStr expects *const i8. 【1-654fc7】
+        // windows-sys exposes pszObjId as *mut u8; CStr expects *const i8.
         let oid = CStr::from_ptr(oid_ptr as *const i8).to_string_lossy();
         oid == "1.2.840.10045.2.1"
     }
