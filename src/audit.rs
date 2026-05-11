@@ -14,7 +14,9 @@ impl AuditGuard {
 
     pub fn log(&self, level: Level, event_id: u32, message: &str) {
         // Log to Windows Event Viewer under 'Application'
-        winlog::event_log(&self.source, level, event_id, &[message]);
+        // Fix E0425: Use winlog::report instead of winlog::event_log
+        // winlog::report(source_name, level, event_id, &[messages])
+        winlog::report(&self.source, level, event_id, &[message]);
     }
 }
 
