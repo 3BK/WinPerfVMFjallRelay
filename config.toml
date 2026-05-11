@@ -2,7 +2,7 @@
 named_pipe_path = "\\\\.\\pipe\\vmetrics_relay"
 
 # Persistent queue
-pub metrics_queue = "C:\\ProgramData\\VmIggyRelay\\storage"
+metrics_queue = "C:\\ProgramData\\VmIggyRelay\\storage"
 
 # Outbound queue
 pingora_url = "https://metrics-proxy.internal:8443/api/v1/import"
