@@ -1,6 +1,10 @@
+# Inbound queue
 named_pipe_path = "\\\\.\\pipe\\vmetrics_relay"
-iggy_stream_id = 100
-iggy_topic_id = 1
+
+# Persistent queue
+pub metrics_queue = "C:\\ProgramData\\VmIggyRelay\\storage"
+
+# Outbound queue
 pingora_url = "https://metrics-proxy.internal:8443/api/v1/import"
 
 # Security Offsets
