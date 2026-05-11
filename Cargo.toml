@@ -25,13 +25,15 @@ tokio-rustls = "0.26"
 webpki-roots = "0.26"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 
-# Log-Structured Persistence
+# Audit Logging
 log = "0.4"
+eventlog = "0.4"
+
+# Log structured persistence
 fjall = "3.1" 
 
 # Windows Native Hardening
 windows-service = "0.8.1"
-winlog2 = "0.3.2"
 widestring = { version = "1.2", features = ["std"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Security_Cryptography",
