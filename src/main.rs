@@ -6,7 +6,9 @@ mod audit;
 
 use std::{env, sync::Arc, path::Path};
 use windows_service::{define_windows_service, service_dispatcher};
-use fjall::{Config as FjallConfig, Database, Keyspace};
+
+// NOTE: add KeyspaceCreateOptions import
+use fjall::{Config as FjallConfig, Database, Keyspace, KeyspaceCreateOptions};
 
 define_windows_service!(ffi_service_main, my_service_main);
 
@@ -35,7 +37,9 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     // 1) Initialize Fjall v3 Database + single keyspace
     let db_path = Path::new(&cfg.buffer.metrics_queue);
     let fjall_db = Database::open(FjallConfig::new(db_path))?;
-    let items: Keyspace = fjall_db.keyspace("metrics", Default::default())?;
+
+    // FIX: Fjall expects a closure: FnOnce() -> KeyspaceCreateOptions 【1-92c161】【2-229519】
+    let items: Keyspace = fjall_db.keyspace("metrics", KeyspaceCreateOptions::default)?;
 
     // 2) Setup Hardened TLS Client (CNG mTLS + server pinning in tls.rs)
     let rustls_cfg = tls::build_rustls_config(
@@ -58,7 +62,6 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     let pipe_path = cfg.ingest.named_pipe_path.clone();
 
-    // Clone keyspace handles for each task (Keyspace is cheap to clone; internally Arc’d) 【1-33fc01】
     let db_ingest = items.clone();
     let db_guard = items.clone();
     let db_egress = items.clone();
@@ -83,9 +86,7 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // 6) Run Egress Loop (fjall -> pingora/victoria) strict FIFO:
-    //     - remove only after HTTP success
-    //     - keep records on any failure, retry with backoff
+    // 6) Run Egress Loop (fjall -> pingora/victoria) strict FIFO
     relay::run_egress(
         pingora_url,
         http_client,
