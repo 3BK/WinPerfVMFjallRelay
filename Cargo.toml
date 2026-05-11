@@ -28,7 +28,7 @@ fjall = "3.1"
 
 # Windows Native Hardening
 windows-service = "0.8.1"
-winlog = "0.2.6"
+winlog2 = "0.3.2"
 widestring = { version = "1.2", features = ["std"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Security_Cryptography",
