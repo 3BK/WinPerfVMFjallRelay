@@ -38,10 +38,10 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Initialize Fjall v3 Database
     // Fix E0599: Use Config::new and Database::open
     let db_path = Path::new("storage"); 
-    let fjall_db = Database::open(Config::new(&cfg.metrics_queue))?;
+    let fjall_db = Database::open(Config::new(Path::new(&cfg.metrics_queue)))?;
 
     // Fix: Open or Create a Keyspace (v3 equivalent of Partition)
-    let items: Keyspace = fjall_db.open_keyspace("metrics_queue", Default::default())?;
+    let items: Keyspace = fjall_db.keyspace("metrics_queue", Default::default())?;
 
     // 2. Setup Hardened TLS Client
     let rustls_cfg = tls::build_rustls_config(&cfg.client_cert_sha1);
