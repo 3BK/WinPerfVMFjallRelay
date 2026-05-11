@@ -34,7 +34,7 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Initialize Fjall Storage
     // NIST SC-28: Ensure the storage path is protected via Windows ACLs
-    let keyspace = Keyspace::open_default("C:\\ProgramData\\VmRelay\\storage")?;
+    let keyspace = Keyspace::open_default(&cfg.metrics_queue)?;
     let db_partition = keyspace.open_partition("metrics_queue", Config::default())?;
 
     // 2. Setup Hardened TLS Client
