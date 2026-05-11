@@ -20,7 +20,7 @@ hex = "0.4"
 rand = "0.10"
 
 # Security & TLS
-rustls = { version = "0.23", features = ["aws_lc_rs", "dangerous_configuration"] } # server certificate pinning
+rustls = { version = "0.23", features = ["aws_lc_rs"] } # server certificate pinning
 sha2 = "0.10"
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
