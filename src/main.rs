@@ -34,8 +34,9 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Initialize Fjall Storage
     // NIST SC-28: Ensure the storage path is protected via Windows ACLs
-    let keyspace = Keyspace::open_default(&cfg.metrics_queue)?;
-    let db_partition = keyspace.open_partition("metrics_queue", Config::default())?;
+    let fjall_config = fjall::Config::new(&cfg.metrics_queue);
+    let keyspace = fjall::Keyspace::open(fjall_config)?;
+    let db_partition = keyspace.open_partition("metrics_queue", fjall::PartitionConfig::default())?;
 
     // 2. Setup Hardened TLS Client
     let rustls_cfg = tls::build_rustls_config(&cfg.client_cert_sha1);
