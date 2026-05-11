@@ -34,9 +34,11 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Initialize Fjall Storage
     // NIST SC-28: Ensure the storage path is protected via Windows ACLs
-    let fjall_config = fjall::Config::new(&cfg.metrics_queue);
-    let keyspace = fjall::Keyspace::open(fjall_config)?;
-    let db_partition = keyspace.open_partition("metrics_queue", fjall::PartitionConfig::default())?;
+    let fjall_db = Database::builder(&cfg.metrics_queue).open()?;
+    // TxDatabase::builder for transactional semantics
+
+    // Each keyspace is its own physical LSM-tree, and thus isolated from other keyspaces
+    let items = fjall_db.keyspace("metrics_queue", KeyspaceCreateOptions::default)?;
 
     // 2. Setup Hardened TLS Client
     let rustls_cfg = tls::build_rustls_config(&cfg.client_cert_sha1);
@@ -46,7 +48,7 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     let audit_ingest = Arc::clone(&audit);
     let pipe_path = cfg.named_pipe_path.clone();
-    let db_ingest = db_partition.clone();
+    let db_ingest = items.clone();
 
     // 3. Spawn Ingestion Task
     tokio::spawn(async move {
