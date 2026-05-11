@@ -10,6 +10,9 @@ tokio = { version = "1.52", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+#time
+chrono = "0.4" 
+
 # Serialization & Config
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"
