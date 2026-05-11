@@ -41,7 +41,7 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Setup Hardened TLS Client
     let rustls_cfg = tls::build_rustls_config(
-        &cfg.tls.client_cert_sha256,
+        &cfg.tls.client_cert_sha1,
         &cfg.tls.server_sha256_pin,
         &audit
     );
