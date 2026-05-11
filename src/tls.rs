@@ -1,27 +1,19 @@
 use crate::audit::AuditGuard;
 
 use log::Level;
-use rustls::client::danger::{DangerousClientConfigBuilder, ServerCertVerifier, ServerCertVerified};
-use rustls::client::{ResolvesClientCert};
-use rustls::crypto::CryptoProvider;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier, ServerCertVerified};
+use rustls::client::ResolvesClientCert;
+use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::sign::{CertifiedKey, Signer, SigningKey};
-use rustls::{
-    ClientConfig, DigitallySignedStruct, Error as RustlsError,
-    RootCertStore, SignatureAlgorithm, SignatureScheme,
-};
+use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureAlgorithm, SignatureScheme};
 
-use rustls::client::danger::HandshakeSignatureValid;
-
-use rustls::client::WebPkiServerVerifier;
-
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::ffi::CStr;
 use std::fmt;
 use std::ptr;
 use std::sync::Arc;
 
-use windows_sys::Win32::Foundation::BOOL;
 use windows_sys::Win32::Security::Cryptography::*;
 
 /// ==========================
@@ -39,6 +31,9 @@ impl Drop for SecureCertStore {
     }
 }
 
+/// Keepalive cert context wrapper.
+/// IMPORTANT: if CryptAcquireCertificatePrivateKey returns caller_free == FALSE, the handle lifetime
+/// can be tied to the cert context, so we must keep it alive while using the key. 【3-316fad】
 struct SecureCertContext(*const CERT_CONTEXT);
 impl Drop for SecureCertContext {
     fn drop(&mut self) {
@@ -51,11 +46,14 @@ impl Drop for SecureCertContext {
 }
 
 /// Per CryptAcquireCertificatePrivateKey contract:
-/// free the handle only when pfCallerFreeProvOrNCryptKey is TRUE. 【1-9cd49b】
+/// free the handle only when pfCallerFreeProvOrNCryptKey is TRUE. 【3-316fad】
+/// Also keep the cert context alive when caller_must_free == false.
 struct SecureNcryptKey {
     h: HCRYPTPROV_OR_NCRYPT_KEY_HANDLE,
     caller_must_free: bool,
+    _cert_ctx_keepalive: Option<Arc<SecureCertContext>>,
 }
+
 impl Drop for SecureNcryptKey {
     fn drop(&mut self) {
         unsafe {
@@ -79,16 +77,13 @@ struct CRYPT_DATA_BLOB_REPR {
 
 /// Build rustls ClientConfig with:
 /// - ECDSA client auth using CNG key handle (mTLS) (non-exportable key).
-/// - Server certificate pinning (SHA-256 of end-entity DER) using dangerous()/custom verifier.
-///
-/// rustls supports custom key usage via SigningKey/Signer extension points. 【9-f57111】【10-3aff9c】
-/// Custom server verification is done via dangerous().with_custom_certificate_verifier(). 【5-5196ea】【6-43a02a】
+/// - Server certificate pinning (SHA-256 of end-entity DER) using dangerous()/custom verifier. 【4-9bed51】【2-c5c7b7】
 pub fn build_rustls_config(
     client_cert_sha1_thumbprint: &str,
     server_cert_sha256_pin_hex: &str,
     audit: &AuditGuard,
 ) -> Arc<ClientConfig> {
-    // Parse the configured pin (hex -> [u8; 32])
+    // Parse configured pin (hex -> [u8; 32])
     let pin = match parse_sha256_pin(server_cert_sha256_pin_hex) {
         Ok(p) => p,
         Err(e) => {
@@ -97,14 +92,14 @@ pub fn build_rustls_config(
         }
     };
 
-    // Build trust roots (still used by WebPkiServerVerifier)
+    // Trust roots used by WebPkiServerVerifier
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
     // Provider (aws-lc-rs)
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
 
-    // Build the default WebPKI verifier (normal PKI validation)
+    // Default WebPKI verifier (normal PKI validation)
     let webpki = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
         .build()
         .expect("failed to build WebPkiServerVerifier");
@@ -124,12 +119,7 @@ pub fn build_rustls_config(
         }
     };
 
-    // Build ClientConfig:
-    // - choose protocol versions
-    // - use dangerous() to set custom verifier
-    // - provide client cert resolver (mTLS)
-    //
-    // ConfigBuilder supports dangerous().with_custom_certificate_verifier(...) for client verification. 【5-5196ea】【11-198614】
+    // Build ClientConfig using dangerous() custom verifier path. 【4-9bed51】【2-c5c7b7】
     let cfg = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("rustls provider/version configuration error")
@@ -159,18 +149,15 @@ impl ServerCertVerifier for PinnedWebPkiVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
-        // 1) Perform normal WebPKI verification first (DNS name, validity, trust chain, etc.)
-        // WebPkiServerVerifier implements ServerCertVerifier. 【7-46b1fe】【6-43a02a】
+        // Normal WebPKI verification first.
         let verified = self
             .inner
             .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
 
-        // 2) Enforce pin on end-entity certificate DER
+        // Pin end-entity cert DER
         let actual = Sha256::digest(end_entity.as_ref());
         if !ct_eq_32(actual.as_slice(), &self.expected_pin) {
-            return Err(RustlsError::General(
-                "server certificate pin mismatch".to_string(),
-            ));
+            return Err(RustlsError::General("server certificate pin mismatch".to_string()));
         }
 
         Ok(verified)
@@ -237,7 +224,7 @@ impl ResolvesClientCert for FixedClientCertResolver {
         _root_hint_subjects: &[&[u8]],
         sigschemes: &[SignatureScheme],
     ) -> Option<Arc<CertifiedKey>> {
-        // Present cert only if we can choose a scheme compatible with the server’s offer. 【2-9b06db】
+        // Present cert only if compatible with server offer.
         if self.key.key.choose_scheme(sigschemes).is_some() {
             Some(self.key.clone())
         } else {
@@ -267,8 +254,7 @@ impl fmt::Debug for CngEcdsaSigningKey {
 
 impl SigningKey for CngEcdsaSigningKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
-        // Prefer strongest offered ECDSA scheme first (assumption: cert matches).
-        // rustls requires choosing from offered SignatureSchemes. 【9-f57111】【10-3aff9c】
+        // Prefer strongest supported scheme first.
         let prefs = [
             SignatureScheme::ECDSA_NISTP384_SHA384,
             SignatureScheme::ECDSA_NISTP256_SHA256,
@@ -306,18 +292,28 @@ impl fmt::Debug for CngEcdsaSigner {
 }
 
 impl Signer for CngEcdsaSigner {
+    // rustls::sign::Signer returns Result<Vec<u8>, rustls::Error> 
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-        sign_ecdsa(self.ncrypt.h, message)
+        // IMPORTANT: rustls passes the message NOT hashed; we must hash based on the scheme. 
+        let digest = match self.scheme {
+            SignatureScheme::ECDSA_NISTP256_SHA256 => Sha256::digest(message).to_vec(),
+            SignatureScheme::ECDSA_NISTP384_SHA384 => Sha384::digest(message).to_vec(),
+            SignatureScheme::ECDSA_NISTP521_SHA512 => Sha512::digest(message).to_vec(),
+            _ => return Err(rustls::Error::General("unsupported ECDSA signature scheme".into())),
+        };
+
+        sign_ecdsa_hash(self.ncrypt.h, &digest)
             .map_err(|_| rustls::Error::General("CNG ECDSA sign failed".into()))
     }
-
 
     fn scheme(&self) -> SignatureScheme {
         self.scheme
     }
 }
 
-fn sign_ecdsa(hkey: HCRYPTPROV_OR_NCRYPT_KEY_HANDLE, hash: &[u8]) -> Result<Vec<u8>, ()> {
+/// Sign a *hash* with CNG ECDSA key handle.
+/// NCryptSignHash expects hash bytes.
+fn sign_ecdsa_hash(hkey: HCRYPTPROV_OR_NCRYPT_KEY_HANDLE, hash: &[u8]) -> Result<Vec<u8>, ()> {
     unsafe {
         let mut sig_len: u32 = 0;
         let st = NCryptSignHash(
@@ -448,7 +444,9 @@ fn load_ecdsa_cng_identity_from_localmachine_my(
         if ctx.is_null() {
             return Err("certificate not found by SHA1 thumbprint".into());
         }
-        let _ctx_guard = SecureCertContext(ctx);
+
+        // Wrap CERT_CONTEXT in Arc so we can keep it alive if the key handle is cached. 【3-316fad】
+        let cert_ctx = Arc::new(SecureCertContext(ctx));
 
         // Optional sanity check: ensure certificate public key algorithm OID is EC.
         if !cert_is_ec(ctx) {
@@ -458,7 +456,9 @@ fn load_ecdsa_cng_identity_from_localmachine_my(
         // Acquire private key (CNG only, silent)
         let mut key_handle: HCRYPTPROV_OR_NCRYPT_KEY_HANDLE = 0;
         let mut key_spec: u32 = 0;
-        let mut caller_free: BOOL = 0;
+
+        // Use i32 rather than BOOL (avoids missing BOOL type in your build). 【1-654fc7】
+        let mut caller_free: i32 = 0;
 
         let flags = CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG;
 
@@ -479,18 +479,23 @@ fn load_ecdsa_cng_identity_from_localmachine_my(
             return Err("certificate private key is not CNG (CERT_NCRYPT_KEY_SPEC mismatch)".into());
         }
 
+        let must_free = caller_free != 0;
+
+        // If the handle is cached (must_free == false), keep cert_ctx alive per contract. 【3-316fad】
+        let keepalive = if must_free { None } else { Some(cert_ctx.clone()) };
+
         let ncrypt = Arc::new(SecureNcryptKey {
             h: key_handle,
-            caller_must_free: caller_free != 0,
+            caller_must_free: must_free,
+            _cert_ctx_keepalive: keepalive,
         });
 
-        // Leaf cert only (you said Pingora doesn't need full chain).
+        // Leaf cert only (Pingora doesn't need full chain).
         let der = std::slice::from_raw_parts((*ctx).pbCertEncoded, (*ctx).cbCertEncoded as usize).to_vec();
         let cert_chain = vec![CertificateDer::from(der)];
 
         let signing_key: Arc<dyn SigningKey> = Arc::new(CngEcdsaSigningKey { ncrypt });
 
-        // CertifiedKey bundles cert chain and SigningKey. 【3-6ee805】
         Ok(Arc::new(CertifiedKey::new(cert_chain, signing_key)))
     }
 }
@@ -505,8 +510,8 @@ fn cert_is_ec(ctx: *const CERT_CONTEXT) -> bool {
         if oid_ptr.is_null() {
             return false;
         }
-        let oid = CStr::from_ptr(oid_ptr).to_string_lossy();
-        // EC public key: 1.2.840.10045.2.1
+        // windows-sys exposes pszObjId as *mut u8; CStr expects *const i8. 【1-654fc7】
+        let oid = CStr::from_ptr(oid_ptr as *const i8).to_string_lossy();
         oid == "1.2.840.10045.2.1"
     }
 }
