@@ -7,9 +7,12 @@ use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::sign::{CertifiedKey, Signer, SigningKey};
 use rustls::{
-    ClientConfig, DigitallySignedStruct, Error as RustlsError, HandshakeSignatureValid,
+    ClientConfig, DigitallySignedStruct, Error as RustlsError,
     RootCertStore, SignatureAlgorithm, SignatureScheme,
 };
+
+use rustls::client::danger::HandshakeSignatureValid;
+
 use rustls::client::WebPkiServerVerifier;
 
 use sha2::{Digest, Sha256};
