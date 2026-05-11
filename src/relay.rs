@@ -6,17 +6,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::net::windows::named_pipe::ServerOptions;
 
-// Fix E0432: Fjall 3.x uses 'Partition' instead of 'PartitionHandle' 
-use fjall::Partition;
+// Fjall 3.x: Partition is now called Keyspace
+use fjall::Keyspace;
 
 // Fix E0599: Import RngExt to enable random_range 
 use rand::{Rng, RngExt}; 
 use log::Level;
 
-/// Ingests data from a Windows Named Pipe and persists it into a Fjall LSM-tree partition.
+/// Ingests data from a Windows Named Pipe and persists it into a Fjall 3.x Keyspace.
 pub async fn run_ingestion(
     pipe_path: String, 
-    db_partition: Partition, 
+    keyspace: Keyspace, 
     audit: Arc<AuditGuard>
 ) {
     let mut server = ServerOptions::new()
@@ -44,7 +44,8 @@ pub async fn run_ingestion(
                 key[8..].copy_from_slice(&counter.to_be_bytes());
 
                 // Atomic write to the embedded store
-                if let Err(e) = db_partition.insert(key, &buf[..n]) {
+                // Fjall 3.x Keyspace implements insert/remove directly
+                if let Err(e) = keyspace.insert(key, &buf[..n]) {
                     audit.log(Level::Error, 502, &format!("Fjall Write Error: {}", e));
                 } else {
                     counter = counter.wrapping_add(1);
@@ -55,11 +56,11 @@ pub async fn run_ingestion(
     }
 }
 
-/// Polls the Fjall partition for the oldest message and attempts to send it to the remote URL.
+/// Polls the Fjall Keyspace for the oldest message and attempts to send it to the remote URL.
 pub async fn run_egress(
     url: String, 
     http: reqwest::Client, 
-    db_partition: Partition, 
+    keyspace: Keyspace, 
     cfg: RelayConfig, 
     audit: Arc<AuditGuard>
 ) {
@@ -67,22 +68,19 @@ pub async fn run_egress(
     let mut rng = rand::rng(); 
 
     loop {
-        // Retrieve the oldest item
-        let first_item = db_partition.iter().next();
+        // In Fjall 3.x, Keyspace provides the iterator directly
+        let first_item = keyspace.iter().next();
 
         if let Some(Ok((key, value))) = first_item {
             match http.post(&url).body(value.to_vec()).send().await {
                 Ok(r) if r.status().is_success() => {
-                    let _ = db_partition.remove(key);
+                    let _ = keyspace.remove(key);
                     backoff = cfg.base_backoff_ms;
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 },
                 _ => {
-                    // Fix E0599: random_range now works because RngExt is in scope 
                     let sleep_ms = backoff + rng.random_range(0..cfg.max_jitter_ms);
-                    
                     audit.log(Level::Warn, 501, &format!("Egress Failure: Retrying in {}ms", sleep_ms));
-                    
                     tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                     backoff = std::cmp::min(backoff * 2, cfg.max_backoff_ms);
                 }
