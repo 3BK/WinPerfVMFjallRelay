@@ -1,4 +1,4 @@
-use winlog; 
+use winlog2;
 use log::Level; // Fixes E0603 [cite: 39]
 
 pub struct AuditGuard {
@@ -8,7 +8,7 @@ pub struct AuditGuard {
 impl AuditGuard {
     pub fn new(source: &str) -> Self {
         // Register the event source with Windows
-        let _ = winlog::register(source); 
+        let _ = winlog2::register(source); 
         Self { source: source.to_string() }
     }
 
@@ -16,7 +16,7 @@ impl AuditGuard {
         // Log to Windows Event Viewer under 'Application'
         // Fix E0425: Use winlog::report instead of winlog::event_log
         // winlog::report(source_name, level, event_id, &[messages])
-        winlog::report(&self.source, level, event_id, &[message]);
+        winlog2::report(&self.source, level, event_id, &[message]);
     }
 }
 
