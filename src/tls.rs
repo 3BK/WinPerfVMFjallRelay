@@ -5,7 +5,7 @@ use rustls::client::danger::{DangerousClientConfigBuilder, ServerCertVerifier, S
 use rustls::client::{ResolvesClientCert};
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::sign::{CertifiedKey, SignError, Signer, SigningKey};
+use rustls::sign::{CertifiedKey, Signer, SigningKey};
 use rustls::{
     ClientConfig, DigitallySignedStruct, Error as RustlsError, HandshakeSignatureValid,
     RootCertStore, SignatureAlgorithm, SignatureScheme,
@@ -303,10 +303,11 @@ impl fmt::Debug for CngEcdsaSigner {
 }
 
 impl Signer for CngEcdsaSigner {
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SignError> {
-        // rustls gives us the message to sign (TLS transcript hash). 【9-f57111】
-        sign_ecdsa(self.ncrypt.h, message).map_err(|_| SignError::new())
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+        sign_ecdsa(self.ncrypt.h, message)
+            .map_err(|_| rustls::Error::General("CNG ECDSA sign failed".into()))
     }
+
 
     fn scheme(&self) -> SignatureScheme {
         self.scheme
